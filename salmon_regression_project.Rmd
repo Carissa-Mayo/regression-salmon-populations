@@ -1,0 +1,335 @@
+---
+title: "Salmon Project"
+author: "Carissa Mayo"
+date: "2021-11-18"
+output: pdf_document
+---
+
+# SALMON POPULATION ANALYSIS - COMPLETE WORKFLOW
+### Analysis of factors affecting Northwestern salmon populations
+
+# Load required libraries
+
+```{r}
+library(tidyverse)
+library(plyr)
+library(car)  # For VIF calculations
+library(here)
+library(ggplot2)
+```
+
+## SECTION 1: DATA IMPORT AND INITIAL SETUP
+
+
+Read primary datasets (adjust file paths as needed)
+Data was obtained from NOAA and research was done to determine number of dams for each river.
+```{r}
+salmon_data <- read.csv("slcws.csv")
+rainfall_data <- read.csv("par.csv")
+logging_data <- read.csv("logging.csv")
+consumption_data <- read.csv("usconsumption.csv")
+streamflow_data <- read.csv("bonnevillestreamflow.csv")
+
+# Read water quality data - each parameter has its own CSV with all rivers
+wq_files <- c("dissolvedoxygen.csv", "pH.csv", "watertemperature.csv", 
+              "chloride.csv", "lead.csv", "chromium.csv", 
+              "ammonia.csv", "arsenic.csv")
+
+wq_data <- list()
+for (file in wq_files) {
+  param_name <- gsub(".csv", "", file)
+  if (file.exists(file)) {
+    wq_data[[param_name]] <- read.csv(file)
+  }
+}
+```
+
+# SECTION 2: DATA CLEANING AND STANDARDIZATION
+
+Clean salmon data
+```{r}
+# Filtering out rivers not in Columbia Basin
+clean_salmon_data <- function(df) {
+  df %>%
+    dplyr::rename(Location = Common.Population.Name)
+}
+
+salmon_clean <- clean_salmon_data(salmon_data)
+```
+
+# SECTION 3: AGGREGATE WATER QUALITY DATA
+
+Calculate yearly averages for water quality parameters
+```{r}
+# Aggregate water quality data
+aggregate_wq <- function(wq_list) {
+  aggregated <- list()
+  
+  clean_location <- function(df) {
+    df %>%
+      mutate(
+        Location = case_when(
+          Location == "Umatilla" ~ "Umatilla River",
+          TRUE ~ Location
+        )
+      )
+  }
+  
+  # Dissolved Oxygen
+  if (!is.null(wq_list$dissolvedoxygen)) {
+    aggregated$DO <- wq_list$dissolvedoxygen %>%
+      clean_location() %>%
+      dplyr::group_by(Location, Year) %>%
+      dplyr::summarize(DissolvedOxygen = mean(Value, na.rm = TRUE), .groups = "drop")
+  }
+  
+  # pH
+  if (!is.null(wq_list$pH)) {
+    aggregated$pH <- wq_list$pH %>%
+      clean_location() %>%
+      dplyr::group_by(Location, Year) %>%
+      dplyr::summarize(pH = mean(Value, na.rm = TRUE), .groups = "drop")
+  }
+  
+  # Water Temperature (multiple statistics)
+  if (!is.null(wq_list$watertemperature)) {
+    aggregated$temp_avg <- wq_list$watertemperature %>%
+      clean_location() %>%
+      dplyr::group_by(Location, Year) %>%
+      dplyr::summarize(Temp = mean(Value, na.rm = TRUE), .groups = "drop")
+    
+    aggregated$temp_max <- wq_list$watertemperature %>%
+      clean_location() %>%
+      dplyr::group_by(Location, Year) %>%
+      dplyr::summarize(TempMax = max(Value, na.rm = TRUE), .groups = "drop")
+    
+    aggregated$temp_min <- wq_list$watertemperature %>%
+      clean_location() %>%
+      dplyr::group_by(Location, Year) %>%
+      dplyr::summarize(TempMin = min(Value, na.rm = TRUE), .groups = "drop")
+    
+    aggregated$temp_summer <- wq_list$watertemperature %>%
+      clean_location() %>%
+      filter(Month >= 6 & Month <= 8) %>%
+      dplyr::group_by(Location, Year) %>%
+      dplyr::summarize(TempSummer = mean(Value, na.rm = TRUE), .groups = "drop")
+  }
+  
+  # Chloride
+  if (!is.null(wq_list$chloride)) {
+    aggregated$chloride <- wq_list$chloride %>%
+      clean_location() %>%
+      dplyr::group_by(Location, Year) %>%
+      dplyr::summarize(Chloride = mean(Value, na.rm = TRUE), .groups = "drop")
+  }
+  
+  # Ammonia
+  if (!is.null(wq_list$ammonia)) {
+    aggregated$ammonia <- wq_list$ammonia %>%
+      clean_location() %>%
+      dplyr::group_by(Location, Year) %>%
+      dplyr::summarize(Ammonia = mean(Value, na.rm = TRUE), .groups = "drop")
+  }
+  
+  # Lead
+  if (!is.null(wq_list$lead)) {
+    aggregated$lead <- wq_list$lead %>%
+      clean_location() %>%
+      dplyr::group_by(Location, Year) %>%
+      dplyr::summarize(Lead = mean(Value, na.rm = TRUE), .groups = "drop")
+  }
+  
+  # Arsenic
+  if (!is.null(wq_list$arsenic)) {
+    aggregated$arsenic <- wq_list$arsenic %>%
+      clean_location() %>%
+      dplyr::group_by(Location, Year) %>%
+      dplyr::summarize(Arsenic = mean(Value, na.rm = TRUE), .groups = "drop")
+  }
+  
+  # Chromium
+  if (!is.null(wq_list$chromium)) {
+    aggregated$chromium <- wq_list$chromium %>%
+      clean_location() %>%
+      dplyr::group_by(Location, Year) %>%
+      dplyr::summarize(Chromium = mean(Value, na.rm = TRUE), .groups = "drop")
+  }
+  
+  return(aggregated)
+}
+
+wq_aggregated <- aggregate_wq(wq_data)
+```
+
+
+# SECTION 4: PREPARE AUXILIARY DATASETS
+
+```{r}
+# Process streamflow data
+streamflow_clean <- streamflow_data %>%
+  dplyr::rename(Year = Water.Year) %>%
+  mutate(
+    Year = as.numeric(Year),
+    MaxFlow = apply(dplyr::select(., Oct:Sep), 1, max, na.rm = TRUE),
+    MinFlow = pmin(Oct, Nov, Dec, Jan, Feb, Mar, Apr, May, Jun, Jul, Aug, Sep, na.rm = TRUE),
+    SDWinterFlow = apply(dplyr::select(., Dec, Jan, Feb), 1, sd, na.rm = TRUE)
+  ) %>%
+  dplyr::select(Year, MaxFlow, MinFlow, SDWinterFlow)
+
+# Process logging data
+logging_clean <- logging_data %>%
+  mutate(
+    Idaho          = as.numeric(gsub("[^0-9.-]", "", Idaho)),
+    Oregon.b       = as.numeric(gsub("[^0-9.-]", "", Oregon.b)),
+    Washington.b   = as.numeric(gsub("[^0-9.-]", "", Washington.b)),
+    TotalNWLogging = Idaho + Oregon.b + Washington.b
+  ) %>%
+  dplyr::select(Year, TotalNWLogging, OregonLogging = Oregon.b, 
+         WashingtonLogging = Washington.b, IdahoLogging = Idaho)
+
+# Process consumption data
+consumption_clean <- consumption_data %>%
+  dplyr::select(Year, FishConsumption = Consumption)
+
+# Process rainfall data
+rainfall_clean <- rainfall_data %>%
+  dplyr::select(Year, Yearly.Rainfall)
+```
+
+# SECTION 5: MERGE ALL DATASETS
+
+```{r}
+# Start with salmon data and progressively merge
+merged_data <- salmon_clean %>%
+  left_join(streamflow_clean, by = "Year") %>%
+  left_join(logging_clean, by = "Year") %>%
+  left_join(consumption_clean, by = "Year") %>%
+  left_join(rainfall_clean, by = "Year")
+
+# Merge water quality data
+for (wq_name in names(wq_aggregated)) {
+  merged_data <- merged_data %>%
+    left_join(wq_aggregated[[wq_name]], by = c("Location", "Year"))
+}
+
+# Remove duplicate rows
+merged_data <- distinct(merged_data)
+```
+
+# SECTION 6: REGRESSION ANALYSIS
+```{r}
+overall_model <- lm(Spawners ~ totaldams + colsnakedams + MaxFlow + MinFlow + 
+                      SDWinterFlow + TotalNWLogging + FishConsumption + 
+                      Yearly.Rainfall + DissolvedOxygen + pH + Temp + 
+                      TempSummer + Ammonia + Chloride,
+                    data = merged_data)
+summary(overall_model)
+
+```
+```{r}
+ggplot(merged_data, aes(x = colsnakedams, y = Spawners)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "lm", se = TRUE, color = "blue", linewidth = 1) +
+  labs(
+    title = "Relationship Between Spawners and Number of Columbia–Snake River Dams",
+    x = "Number of Dams (colsnakedams)",
+    y = "Spawner Count"
+  ) +
+  theme_minimal(base_size = 14)
+```
+### Each additional dam is associated with ~428 fewer returning spawners, and the effect is statistically significant (p < 0.01).
+
+# SECTION 7: INDIVIDUAL RIVER ANALYSES
+```{r}
+analyze_river <- function(data, river_name, predictors) {
+  cat("\n", rep("=", 80), "\n", sep = "")
+  cat("ANALYSIS FOR:", river_name, "\n")
+  cat(rep("=", 80), "\n\n", sep = "")
+  
+  river_data <- data %>% filter(Location == river_name)
+  
+  # Build formula
+  formula_str <- paste("Spawners ~", paste(predictors, collapse = " + "))
+  
+  # Fit model
+  model <- lm(as.formula(formula_str), data = river_data)
+  
+  # Backward elimination
+  cat("Initial Model:\n")
+  print(summary(model))
+  
+  # Calculate VIF if possible
+  if (length(predictors) > 1) {
+    cat("\n--- Variance Inflation Factors ---\n")
+    tryCatch({
+      vif_vals <- vif(model)
+      print(vif_vals)
+    }, error = function(e) {
+      cat("VIF calculation not possible\n")
+    })
+  }
+  
+  # Diagnostic plots
+  par(mfrow = c(2, 2))
+  plot(model, main = river_name)
+  par(mfrow = c(1, 1))
+  
+  return(model)
+}
+
+# Analyze Umatilla River
+umatilla_data <- merged_data %>% 
+  filter(Location == "Umatilla River")
+
+umatilla_predictors <- c( "Yearly.Rainfall", "colsnakedams")
+umatilla_model <- analyze_river(umatilla_data, "Umatilla River", umatilla_predictors)
+
+```
+```{r}
+# Analyze Umatilla River
+minam_data <- merged_data %>% 
+  filter(Location == "Minam River")
+
+minam_predictors <- c("FishConsumption", "DissolvedOxygen", "TempMax", "Yearly.Rainfall", "totaldams", "pH", "TempSummer", "Ammonia")
+minam_model <- analyze_river(minam_data, "Minam River", minam_predictors)
+```
+
+# SECTION 8: LOGGING AND CONSUMPTION ANALYSIS
+```{r}
+cat("\n", rep("=", 80), "\n", sep = "")
+cat("OVERALL SALMON POPULATION vs LOGGING AND CONSUMPTION\n")
+cat(rep("=", 80), "\n\n", sep = "")
+
+# Aggregate salmon by year
+total_salmon <- merged_data %>%
+  group_by(Year) %>%
+  dplyr::summarise(
+    TotalSpawners = sum(Spawners, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  left_join(logging_clean, by = "Year") %>%
+  left_join(consumption_clean, by = "Year")
+
+# Regression analysis
+logging_model <- lm(TotalSpawners ~ TotalNWLogging + FishConsumption, 
+                    data = total_salmon)
+cat("Model: Total Spawners ~ Logging + Consumption\n")
+print(summary(logging_model))
+
+# Plot
+plot(logging_model)
+```
+
+# SECTION 9: SUMMARY STATISTICS
+```{r}
+
+cat("Dataset dimensions:", nrow(merged_data), "rows x", ncol(merged_data), "columns\n\n")
+
+cat("Years covered:", min(merged_data$Year, na.rm = TRUE), "-", 
+    max(merged_data$Year, na.rm = TRUE), "\n\n")
+
+cat("Number of unique locations:", n_distinct(merged_data$Location), "\n\n")
+
+cat("Summary of spawner counts:\n")
+print(summary(merged_data$Spawners))
+```
