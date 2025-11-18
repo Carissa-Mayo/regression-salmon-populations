@@ -1,6 +1,5 @@
 # PNW Salmon Population Analysis
-
-### Updated group project from STAT 3400
+Updated group project from STAT 3400
 
 ## Goal: Using regression analysis to identify key predictors on the declining salmon population in the Northwest.
 ## Results: This script sets up to examine Northwest salmon populations as a whole and allows for smaller scale analysis on individual rivers. Overall, dams in the rivers have a significant affect on salmon populations as well as fish consumption.
